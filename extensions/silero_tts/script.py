@@ -22,7 +22,7 @@ params = {
     'language': 'Spanish',
     'model_id': 'v3_es',
     'sample_rate': 48000,
-    'device': 'cuda',
+    'device': 'cuda', # can be set to 'cpu' 
     'show_text': False,
     'autoplay': True,
     'voice_pitch': 'medium',
