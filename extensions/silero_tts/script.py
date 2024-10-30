@@ -6,6 +6,8 @@ from pathlib import Path
 
 import gradio as gr
 import torch
+import numpy as np
+import soundfile as sf
 
 from extensions.silero_tts import tts_preprocessor
 from modules import chat, shared, ui_chat
@@ -16,11 +18,11 @@ torch._C._jit_set_profiling_mode(False)
 
 params = {
     'activate': True,
-    'speaker': 'en_56',
-    'language': 'English',
-    'model_id': 'v3_en',
+    'speaker': 'es_2',
+    'language': 'Spanish',
+    'model_id': 'v3_es',
     'sample_rate': 48000,
-    'device': 'cpu',
+    'device': 'cuda',
     'show_text': False,
     'autoplay': True,
     'voice_pitch': 'medium',
@@ -44,7 +46,6 @@ table = str.maketrans({
     "'": "&apos;",
     '"': "&quot;",
 })
-
 
 def xmlesc(txt):
     return txt.translate(table)
@@ -110,41 +111,145 @@ def history_modifier(history):
     return history
 
 
+
+def chunk_text(text, max_length=1000):
+    """
+    Chunks a long text into smaller pieces for processing.
+
+    Args:
+        text (str): The input text to be chunked.
+        max_length (int): The maximum length of each chunk.
+
+    Returns:
+        list: A list of text chunks.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+
+    result_chunks = []
+    remaining_text = text.strip()
+
+    try:
+        while remaining_text:
+            if len(remaining_text) <= max_length:
+                result_chunks.append(remaining_text)
+                break
+
+            # Find the last sentence boundary within max_length
+            search_text = remaining_text[:max_length]
+            last_period = search_text.rfind('.')
+            last_question = search_text.rfind('?')
+            last_exclamation = search_text.rfind('!')
+
+            # Find the latest sentence boundary
+            split_point = max(last_period, last_question, last_exclamation)
+
+            if split_point == -1 or split_point == 0:
+                # If no sentence boundary found, split at max_length
+                split_point = max_length
+
+            # Add the chunk and update remaining text
+            current_chunk = remaining_text[:split_point + 1].strip()
+            if current_chunk:
+                result_chunks.append(current_chunk)
+            remaining_text = remaining_text[split_point + 1:].strip()
+
+    except Exception as e:
+        print(f"Error in chunk_text: {str(e)}")
+        return [text]  # Return original text as single chunk if error occurs
+
+    return result_chunks
+
+def apply_tts(model, text, speaker, sample_rate):
+    # Assuming model.apply_tts is a valid method for the TTS model, adjust as needed.
+    return model.apply_tts(text=text, speaker=speaker, sample_rate=sample_rate)
+
+
+def process_long_text(model, text, **kwargs):
+    """
+    Processes a long text by chunking it and generating audio for each chunk.
+
+    Args:
+    model: The TTS model to use.
+    text: The input text to be processed.
+    **kwargs: Additional keyword arguments to pass to the TTS model.
+
+    Returns:
+    The concatenated audio for the entire text.
+    """
+    if not text:
+        return np.array([])
+        
+    chunks = chunk_text(text)
+    audio_chunks = []
+    
+    for chunk in chunks:
+        audio_chunk = apply_tts(model, chunk, **kwargs)
+        if audio_chunk is not None and len(audio_chunk) > 0:
+            audio_chunks.append(audio_chunk)
+            
+    return np.concatenate(audio_chunks) if audio_chunks else np.array([])
+    
 def output_modifier(string, state):
-    global model, current_params, streaming_state
+    global model, current_params
 
-    for i in params:
-        if params[i] != current_params[i]:
-            model = load_model()
-            current_params = params.copy()
-            break
-
-    if not params['activate']:
+    if not params.get('activate', False):
         return string
 
-    original_string = string
+    current_params = current_params or {}
+    params_changed = False
 
+    for key, value in params.items():
+        if current_params.get(key) != value:
+            params_changed = True
+            current_params[key] = value
+
+    if params_changed:
+        model = load_model()
+
+    original_string = string
     string = tts_preprocessor.preprocess(html.unescape(string))
 
-    if string == '':
-        string = '*Empty reply, try regenerating*'
-    else:
-        output_file = Path(f'extensions/silero_tts/outputs/{state["character_menu"]}_{int(time.time())}.wav')
-        prosody = '<prosody rate="{}" pitch="{}">'.format(params['voice_speed'], params['voice_pitch'])
-        silero_input = f'<speak>{prosody}{xmlesc(string)}</prosody></speak>'
-        model.save_wav(ssml_text=silero_input, speaker=params['speaker'], sample_rate=int(params['sample_rate']), audio_path=str(output_file))
+    if not string:
+        return '*Empty reply, try regenerating*'
 
-        autoplay = 'autoplay' if params['autoplay'] else ''
-        string = f'<audio src="file/{output_file.as_posix()}" controls {autoplay}></audio>'
-        if params['show_text']:
-            string += f'\n\n{original_string}'
+    output_file = Path(f'extensions/silero_tts/outputs/{state["character_menu"]}_{int(time.time())}.wav')
+    prosody = f'<prosody rate="{params["voice_speed"]}" pitch="{params["voice_pitch"]}">'
+    silero_input = f'<speak>{prosody}{xmlesc(string)}</prosody></speak>'
 
-    shared.processing_message = "*Is typing...*"
-    return string
+    try:
+        audio = process_long_text(
+            model,
+            silero_input,
+            speaker=params['speaker'],
+            sample_rate=int(params['sample_rate'])
+        )
 
+        if len(audio) > 0:
+            sf.write(str(output_file), audio, int(params['sample_rate']))
+
+            autoplay = 'autoplay' if params.get('autoplay', False) else ''
+            audio_html = f'<audio src="file/{output_file.as_posix()}" controls {autoplay}></audio>'
+
+            if params.get('show_text', False):
+                return f'{audio_html}\n\n{original_string}'
+            return audio_html
+
+    except Exception as e:
+        print(f"Error generating audio: {str(e)}")
+
+    return original_string
 
 def setup():
-    global model
+    """
+    Sets up the TTS model and initializes parameters.
+    """
+    global model, current_params
+    
+    current_params = {}
+    for key, value in params.items():
+        current_params[key] = value
+        
     model = load_model()
 
 
