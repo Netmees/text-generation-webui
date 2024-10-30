@@ -101,13 +101,37 @@ def input_modifier(string, state):
 
 
 def history_modifier(history):
-    # Remove autoplay from the last reply
-    if len(history['internal']) > 0:
-        history['visible'][-1] = [
-            history['visible'][-1][0],
-            history['visible'][-1][1].replace('controls autoplay>', 'controls>')
-        ]
-
+    """
+    Modifies the chat history to ensure only the latest audio message autoplays.
+    
+    Args:
+        history (dict): Chat history containing 'internal' and 'visible' message lists
+        
+    Returns:
+        dict: Modified chat history with correct autoplay attributes
+    """
+    if not history['visible'] or len(history['visible']) == 0:
+        return history
+        
+    # Remove autoplay from all messages except the last one
+    for i in range(len(history['visible']) - 1):
+        entry = history['visible'][i]
+        if isinstance(entry[1], str) and '<audio' in entry[1]:
+            history['visible'][i] = [
+                entry[0],
+                entry[1].replace('controls autoplay', 'controls')
+            ]
+    
+    # Ensure the last message has autoplay if it contains audio and autoplay is enabled
+    if params.get('autoplay', False) and len(history['visible']) > 0:
+        last_entry = history['visible'][-1]
+        if isinstance(last_entry[1], str) and '<audio' in last_entry[1]:
+            if 'controls autoplay' not in last_entry[1]:
+                history['visible'][-1] = [
+                    last_entry[0],
+                    last_entry[1].replace('controls>', 'controls autoplay>')
+                ]
+    
     return history
 
 
