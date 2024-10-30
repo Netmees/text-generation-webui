@@ -3,7 +3,7 @@ import json
 import random
 import time
 from pathlib import Path
-
+import re
 import gradio as gr
 import torch
 import numpy as np
@@ -22,7 +22,7 @@ params = {
     'language': 'Spanish',
     'model_id': 'v3_es',
     'sample_rate': 48000,
-    'device': 'cuda', # can be set to 'cpu' 
+    'device': 'cuda',
     'show_text': False,
     'autoplay': True,
     'voice_pitch': 'medium',
@@ -214,6 +214,32 @@ def process_long_text(model, text, **kwargs):
             
     return np.concatenate(audio_chunks) if audio_chunks else np.array([])
     
+def clean_ssml(text):
+    """
+    Remove SSML tags from text while preserving the content.
+    
+    Args:
+        text (str): Input text that may contain SSML tags
+        
+    Returns:
+        str: Clean text without SSML tags
+    """
+    # Remove common SSML tags but keep their content
+    ssml_patterns = [
+        (r'<speak>\s*', ''),
+        (r'</speak>\s*', ''),
+        (r'<prosody[^>]*>\s*', ''),
+        (r'</prosody>\s*', ''),
+        (r'rate="[^"]*"', ''),
+        (r'pitch="[^"]*"', '')
+    ]
+    
+    cleaned_text = text
+    for pattern, replacement in ssml_patterns:
+        cleaned_text = re.sub(pattern, replacement, cleaned_text, flags=re.IGNORECASE)
+    
+    return cleaned_text.strip()
+
 def output_modifier(string, state):
     global model, current_params
 
@@ -232,19 +258,26 @@ def output_modifier(string, state):
         model = load_model()
 
     original_string = string
+    
+    # Primero preprocesar el texto
     string = tts_preprocessor.preprocess(html.unescape(string))
-
+    
     if not string:
         return '*Empty reply, try regenerating*'
 
-    output_file = Path(f'extensions/silero_tts/outputs/{state["character_menu"]}_{int(time.time())}.wav')
+    # Preparar el texto con SSML para el modelo
     prosody = f'<prosody rate="{params["voice_speed"]}" pitch="{params["voice_pitch"]}">'
     silero_input = f'<speak>{prosody}{xmlesc(string)}</prosody></speak>'
+    
+    # Limpiar el texto de etiquetas SSML antes de pasarlo al modelo
+    cleaned_text = clean_ssml(silero_input)
+
+    output_file = Path(f'extensions/silero_tts/outputs/{state["character_menu"]}_{int(time.time())}.wav')
 
     try:
         audio = process_long_text(
             model,
-            silero_input,
+            cleaned_text,  # Usar el texto limpio para la síntesis
             speaker=params['speaker'],
             sample_rate=int(params['sample_rate'])
         )
@@ -263,7 +296,7 @@ def output_modifier(string, state):
         print(f"Error generating audio: {str(e)}")
 
     return original_string
-
+    
 def setup():
     """
     Sets up the TTS model and initializes parameters.
